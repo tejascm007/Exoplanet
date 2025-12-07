@@ -1,0 +1,539 @@
+{
+  "name": "Exoplanet Atmosphere Analyzer",
+  "nodes": [
+    {
+      "parameters": {
+        "url": "https://exoplanetarchive.ipac.caltech.edu/TAP/sync",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "=query",
+              "value": "=select pl_name,pl_orbper,pl_rade,pl_bmasse,pl_orbeccen,st_teff,st_rad,st_mass,sy_dist,pl_eqt from ps where pl_name='{{ $json.body.exoplanet_name }}' and default_flag=1"
+            },
+            {
+              "name": "format",
+              "value": "json"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-workflow"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        48,
+        -880
+      ],
+      "id": "fed5023c-691c-4e22-a50b-5ee4e0d04565",
+      "name": "HTTP Request - NASA API"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "exoplanet-analysis",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "http://localhost:8080"
+        }
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -176,
+        -880
+      ],
+      "id": "91e7efb0-bd42-4c65-a94a-cdac4ae103ee",
+      "name": "Webhook - Receive Query",
+      "webhookId": "8ad161d6-9803-4382-bf19-7adca2aedacb"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract NASA API response - handle different data structures\nlet nasaData;\n\n// Try different ways to access the data\nif ($input.first().json.body) {\n  // If data is in body property\n  nasaData = $input.first().json.body;\n} else if (Array.isArray($input.first().json)) {\n  // If it's already an array\n  nasaData = $input.first().json;\n} else {\n  // Direct object\n  nasaData = [$input.first().json];\n}\n\n// Debug: log what we received\nconsole.log(\"Received data structure:\", JSON.stringify(nasaData, null, 2));\n\n// Check if data exists\nif (!nasaData || nasaData.length === 0) {\n  return [{\n    json: {\n      error: true,\n      message: \"Exoplanet not found in NASA database\",\n      debug_data: $input.first().json\n    }\n  }];\n}\n\nconst exoplanet = nasaData[0];\n\n// Additional safety check\nif (!exoplanet || !exoplanet.pl_name) {\n  return [{\n    json: {\n      error: true,\n      message: \"Invalid exoplanet data structure\",\n      received_data: exoplanet\n    }\n  }];\n}\n\n// Helper function to handle nulls\nconst parseValue = (val, defaultVal = null) => {\n  if (val === null || val === undefined || val === \"null\") return defaultVal;\n  const parsed = parseFloat(val);\n  return isNaN(parsed) ? defaultVal : parsed;\n};\n\n// Normalize and prepare features for the model\nconst features = {\n  planet_name: exoplanet.pl_name || \"Unknown\",\n  \n  // Orbital parameters\n  orbital_period: parseValue(exoplanet.pl_orbper),\n  planet_radius: parseValue(exoplanet.pl_rade),\n  planet_mass: parseValue(exoplanet.pl_bmasse),\n  eccentricity: parseValue(exoplanet.pl_orbeccen),\n  \n  // Stellar parameters\n  stellar_temp: parseValue(exoplanet.st_teff),\n  stellar_radius: parseValue(exoplanet.st_rad),\n  stellar_mass: parseValue(exoplanet.st_mass),\n  \n  // System parameters\n  distance: parseValue(exoplanet.sy_dist),\n  equilibrium_temp: parseValue(exoplanet.pl_eqt),\n};\n\n// Create input string for the model (only include non-null values)\nlet modelInput = `Analyze exoplanet ${features.planet_name}: `;\nif (features.planet_radius) modelInput += `Radius ${features.planet_radius} Earth radii, `;\nif (features.planet_mass) modelInput += `Mass ${features.planet_mass} Earth masses, `;\nif (features.orbital_period) modelInput += `Orbital Period ${features.orbital_period} days, `;\nif (features.equilibrium_temp) modelInput += `Equilibrium Temp ${features.equilibrium_temp}K, `;\nif (features.stellar_temp) modelInput += `Stellar Temp ${features.stellar_temp}K, `;\nif (features.eccentricity) modelInput += `Eccentricity ${features.eccentricity}`;\nmodelInput += \". Predict atmospheric composition.\";\n\nreturn [{\n  json: {\n    inputs: modelInput,\n    raw_features: features\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -880
+      ],
+      "id": "8fb72a81-8b46-40b2-968a-43cba16bad0a",
+      "name": "Function - Preprocess Data"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get Flask API response (not HF anymore)\nconst flaskResponse = $input.first().json;\n\n// Extract the actual data (it might be wrapped in 'body')\nconst responseData = flaskResponse.body || flaskResponse;\n\n// Get preprocessing data if available, with fallback\nconst processedData = $('Function - Preprocess Data').first()?.json || {};\nconst rawFeatures = processedData.raw_features || {};\n\n// Extract atmospheric composition from Flask response\nconst composition = responseData.atmospheric_composition || {};\n\n// Build predictions object from Flask response\nlet predictions = {\n  h2o_percentage: composition.H2O || 0,\n  ch4_percentage: composition.CH4 || 0,\n  co2_percentage: composition.CO2 || 0,\n  nh3_percentage: composition.NH3 || 0,\n  h2_percentage: composition.H2 || 0,\n  he_percentage: composition.He || 0,\n  n2_percentage: composition.N2 || 0,\n  co_percentage: composition.CO || 0,\n  biosignature_score: 0,\n  confidence_score: 0\n};\n\ntry {\n  // Calculate biosignature score based on composition\n  // High H2O + CH4 with moderate CO2 suggests potential biosignatures\n  predictions.biosignature_score = (\n    (predictions.h2o_percentage / 100) * 0.4 +\n    (predictions.ch4_percentage / 100) * 0.3 +\n    (predictions.co2_percentage > 0.5 ? 0.2 : 0) +\n    0.1  // base score\n  );\n  \n  // Normalize biosignature score to 0-1 range\n  predictions.biosignature_score = Math.min(predictions.biosignature_score, 1);\n  \n  // Confidence from Flask API\n  const confidenceMap = {\n    'high': 0.9,\n    'medium': 0.7,\n    'low': 0.5\n  };\n  predictions.confidence_score = confidenceMap[responseData.confidence] || 0.65;\n  \n} catch (error) {\n  console.error('Prediction parsing error:', error);\n  predictions.biosignature_score = 0.5;\n  predictions.confidence_score = 0.5;\n}\n\n// Get planet name with multiple fallbacks\nconst planetName = responseData.planet_name || \n                   rawFeatures.planet_name || \n                   processedData.inputs || \n                   \"Unknown Exoplanet\";\n\nreturn [{\n  json: {\n    planet_name: planetName,\n    predictions: predictions,\n    atmospheric_composition: composition,\n    total_percentage: responseData.total_percentage || 0,\n    confidence: responseData.confidence || \"unknown\",\n    missing_features: responseData.missing_features || [],\n    raw_features: rawFeatures,\n    metadata: responseData.metadata || {},\n    analysis_timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1168,
+        -880
+      ],
+      "id": "96b712ca-ee80-4a49-9ac6-2cf63c37cd7e",
+      "name": "Function - Parse Predictions"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-safeguard-20b",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        1464,
+        -656
+      ],
+      "id": "5095ef49-d2c8-4fa1-a758-e690a20578d0",
+      "name": "AI Agent / LLM - Generate Report1",
+      "credentials": {
+        "groqApi": {
+          "id": "3A1GqlzMy6Tm8tte",
+          "name": "Groq-Exoplanet"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=={{ \"Generate comprehensive report for \" + $('Function - Parse Predictions').first().json.planet_name + \" with atmospheric composition: H2O=\" + $('Function - Parse Predictions').first().json.predictions.h2o_percentage.toFixed(3) + \"%, CH4=\" + $('Function - Parse Predictions').first().json.predictions.ch4_percentage.toFixed(3) + \"%, CO2=\" + $('Function - Parse Predictions').first().json.predictions.co2_percentage.toFixed(3) + \"%, NH3=\" + $('Function - Parse Predictions').first().json.predictions.nh3_percentage.toFixed(3) + \"%. Biosignature score: \" + $('Function - Parse Predictions').first().json.predictions.biosignature_score.toFixed(3) + \". Include executive summary, atmospheric analysis, biosignature assessment, scientific implications, and observation recommendations.\" }}\n\n",
+        "options": {
+          "systemMessage": "You are a helpfuYou are an expert astrophysicist specializing in exoplanet atmospheric composition analysis. Generate a detailed scientific report based on predictive data.\nl assistant",
+          "maxIterations": 1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        1392,
+        -880
+      ],
+      "id": "83144617-997c-4ef3-94a7-f7568447cb37",
+      "name": "AI Agent - Report Generator"
+    },
+    {
+      "parameters": {
+        "jsCode": "const reportData = $('AI Agent - Report Generator').first().json;\nconst reportText = reportData.output || reportData.response || reportData.text;\nconst predictions = $('Function - Parse Predictions').first().json;\n\n// Get raw features with fallbacks\nconst features = predictions.raw_features || {};\n\n// Helper function to safely get values\nconst getValue = (value, defaultValue = 'N/A', unit = '') => {\n  if (value === null || value === undefined) return defaultValue;\n  return `${value}${unit}`;\n};\n\n// Create formatted report content\nconst reportContent = `\nEXOPLANET ATMOSPHERIC COMPOSITION ANALYSIS REPORT\n================================================================\n\nPlanet: ${predictions.planet_name}\nAnalysis Date: ${predictions.analysis_timestamp}\nReport ID: ${Date.now()}\n\n================================================================\nATMOSPHERIC COMPOSITION PREDICTIONS\n================================================================\n\nHydrogen (H2):         ${predictions.predictions.h2_percentage.toFixed(2)}%\nHelium (He):           ${predictions.predictions.he_percentage.toFixed(2)}%\nWater (H2O):           ${predictions.predictions.h2o_percentage.toFixed(2)}%\nMethane (CH4):         ${predictions.predictions.ch4_percentage.toFixed(2)}%\nCarbon Dioxide (CO2):  ${predictions.predictions.co2_percentage.toFixed(2)}%\nNitrogen (N2):         ${predictions.predictions.n2_percentage.toFixed(2)}%\nAmmonia (NH3):         ${predictions.predictions.nh3_percentage.toFixed(2)}%\nCarbon Monoxide (CO):  ${predictions.predictions.co_percentage.toFixed(2)}%\n\nTotal Composition:     ${predictions.total_percentage.toFixed(2)}%\n\nBiosignature Score:    ${predictions.predictions.biosignature_score.toFixed(3)}\nConfidence Level:      ${(predictions.predictions.confidence_score * 100).toFixed(1)}%\nAnalysis Confidence:   ${predictions.confidence.toUpperCase()}\n\n================================================================\nDETAILED ANALYSIS\n================================================================\n\n${reportText}\n\n================================================================\nTECHNICAL DATA\n================================================================\n\nPlanetary Parameters:\n- Name: ${predictions.planet_name}\n- Radius: ${getValue(features.planet_radius, 'N/A', ' Earth radii')}\n- Mass: ${getValue(features.planet_mass, 'N/A', ' Earth masses')}\n- Orbital Period: ${getValue(features.orbital_period, 'N/A', ' days')}\n- Eccentricity: ${getValue(features.eccentricity, 'N/A')}\n- Equilibrium Temperature: ${getValue(features.equilibrium_temp, 'N/A', ' K')}\n\nStellar Parameters:\n- Temperature: ${getValue(features.stellar_temp, 'N/A', ' K')}\n- Radius: ${getValue(features.stellar_radius, 'N/A', ' Solar radii')}\n- Mass: ${getValue(features.stellar_mass, 'N/A', ' Solar masses')}\n- Distance: ${getValue(features.distance, 'N/A', ' parsecs')}\n\nModel Information:\n- Model Type: ${predictions.metadata.model || 'Transformer-based Deep Learning'}\n- Input Features: ${predictions.metadata.input_features || 'N/A'}\n- Molecules Predicted: ${predictions.metadata.molecules_predicted || 'N/A'}\n${predictions.missing_features.length > 0 ? `- Missing Features: ${predictions.missing_features.join(', ')}` : ''}\n\n================================================================\nEND OF REPORT\n================================================================\n`;\n\n// Generate unique filename\nconst filename = `${predictions.planet_name.replace(/\\s+/g, '_')}_${Date.now()}.txt`;\n\n// Convert to Buffer for binary data\nconst reportBuffer = Buffer.from(reportContent, 'utf-8');\nconst reportBase64 = reportBuffer.toString('base64');\n\nreturn [{\n  json: {\n    report_content: reportContent,\n    report_base64: reportBase64,\n    filename: filename,\n    content_type: 'text/plain',\n    content_length: reportBuffer.length,\n    predictions: predictions,\n    planet_name: predictions.planet_name\n  },\n  binary: {\n    data: {\n      data: reportBuffer.toString('base64'),\n      mimeType: 'text/plain',\n      fileName: filename\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1744,
+        -880
+      ],
+      "id": "e013299d-7141-47b6-9f6c-9c8309af81e1",
+      "name": "Function - Create PDF Content"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://kxsrzwnsseulxuptduib.supabase.co/storage/v1/object/exoplanet-reports/{{ $('Function - Create PDF Content').first().json.filename }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "supabaseApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt4c3J6d25zc2V1bHh1cHRkdWliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3MjU2NTYsImV4cCI6MjA3OTMwMTY1Nn0.-t71PrWJkEq3EI5wd-OJE9ARO_-amHXJ_fqV460A0OQ"
+            },
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt4c3J6d25zc2V1bHh1cHRkdWliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM3MjU2NTYsImV4cCI6MjA3OTMwMTY1Nn0.-t71PrWJkEq3EI5wd-OJE9ARO_-amHXJ_fqV460A0OQ"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/text"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1968,
+        -880
+      ],
+      "id": "231845bc-6c39-41d6-997c-668d8603bd97",
+      "name": "HTTP Request - Supabase Storage Upload PDF",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "DkwN7aEdRQhlu5v4",
+          "name": "apikey"
+        },
+        "supabaseApi": {
+          "id": "3DzFzpJat7y0tTyq",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const filename = $('Function - Create PDF Content').first().json.filename;\nconst supabaseUrl = 'https://kxsrzwnsseulxuptduib.supabase.co';\nconst bucketName = 'exoplanet-reports';\n\n// Public URL format (no expiration)\nconst publicUrl = `${supabaseUrl}/storage/v1/object/public/${bucketName}/${filename}`;\n\nreturn [{\n  json: {\n    publicURL: publicUrl,\n    filename: filename\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2192,
+        -880
+      ],
+      "id": "998ca099-2980-4802-8b40-8d65b882866a",
+      "name": "Function - Generate Public URL"
+    },
+    {
+      "parameters": {
+        "tableId": "exoplanet_predictions",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "h2o_percentage",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.predictions.h2o_percentage }}\n"
+            },
+            {
+              "fieldId": "ch4_percentage",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.predictions.ch4_percentage }}\n"
+            },
+            {
+              "fieldId": "co2_percentage",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.predictions.co2_percentage }}\n"
+            },
+            {
+              "fieldId": "nh3_percentage",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.predictions.nh3_percentage }}\n"
+            },
+            {
+              "fieldId": "biosignature_score",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.predictions.biosignature_score }}\n"
+            },
+            {
+              "fieldId": "confidence_score",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.predictions.confidence_score }}\n"
+            },
+            {
+              "fieldId": "planet_radius",
+              "fieldValue": "={{ $('Code in JavaScript1').item.json.pl_rade }}"
+            },
+            {
+              "fieldId": "planet_mass",
+              "fieldValue": "={{ $('Code in JavaScript1').item.json.pl_bmasse }}"
+            },
+            {
+              "fieldId": "equilibrium_temp",
+              "fieldValue": "={{ $('Code in JavaScript1').item.json.pl_eqt }}"
+            },
+            {
+              "fieldId": "orbital_period",
+              "fieldValue": "={{ $('Code in JavaScript1').item.json.pl_orbper }}"
+            },
+            {
+              "fieldId": "stellar_temp",
+              "fieldValue": "={{ $('Code in JavaScript1').item.json.st_teff }}"
+            },
+            {
+              "fieldId": "eccentricity",
+              "fieldValue": "={{ $('Code in JavaScript1').item.json.pl_orbeccen }}"
+            },
+            {
+              "fieldId": "report_storage_url",
+              "fieldValue": "={{ $json.publicURL }}"
+            },
+            {
+              "fieldId": "report_filename",
+              "fieldValue": "={{ $('Function - Create PDF Content').first().json.filename }}"
+            },
+            {
+              "fieldId": "model_version",
+              "fieldValue": "Exoplanet Atmospheric Composition Prediction local model"
+            },
+            {
+              "fieldId": "exoplanet_name",
+              "fieldValue": "={{ $('Function - Parse Predictions').first().json.planet_name }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        2416,
+        -880
+      ],
+      "id": "8a27e3a7-ce53-4329-8e51-771f6f262e64",
+      "name": "Supabase - Insert Prediction Data",
+      "credentials": {
+        "supabaseApi": {
+          "id": "3DzFzpJat7y0tTyq",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={\n  \"status\": \"success\",\n  \"message\": \"Exoplanet atmospheric composition analysis completed successfully\",\n  \"data\": {\n    \"prediction_id\": {{ $json.id }},\n    \"exoplanet_name\": \"{{ $('Function - Parse Predictions').first().json.planet_name }}\",\n    \"analysis_timestamp\": \"{{ $('Function - Parse Predictions').first().json.analysis_timestamp }}\",\n    \"atmospheric_composition\": {\n      \"H2O\": {{ $('Function - Parse Predictions').first().json.predictions.h2o_percentage.toFixed(4) }},\n      \"CH4\": {{ $('Function - Parse Predictions').first().json.predictions.ch4_percentage.toFixed(4) }},\n      \"CO2\": {{ $('Function - Parse Predictions').first().json.predictions.co2_percentage.toFixed(4) }},\n      \"NH3\": {{ $('Function - Parse Predictions').first().json.predictions.nh3_percentage.toFixed(4) }}\n    },\n    \"scores\": {\n      \"biosignature_score\": {{ $('Function - Parse Predictions').first().json.predictions.biosignature_score.toFixed(4) }},\n      \"confidence_level\": {{ ($('Function - Parse Predictions').first().json.predictions.confidence_score * 100).toFixed(2) }}\n    },\n    \"planetary_parameters\": {\n      \"radius\": {{ $json.planet_radius }},\n      \"mass\": {{ $json.planet_mass }},\n      \"equilibrium_temp_kelvin\": {{ $json.equilibrium_temp }},\n      \"orbital_period_days\": {{ $json.orbital_period }},\n      \"stellar_temp_kelvin\": {{ $json.stellar_temp }}\n    },\n    \"report\": {\n      \"download_url\": \"{{ $json.report_storage_url }}\",\n      \"filename\": \"{{ $('Function - Create PDF Content').first().json.filename }}\",\n      \"expires_in_days\": 30,\n      \"content_type\": \"application/pdf\"\n    }\n  },\n  \"metadata\": {\n    \"model_version\": \"{{ $json.model_version }}\",\n    \"data_source\": \"NASA Exoplanet Archive\",\n    \"generated_at\": \"{{ new Date().toISOString() }}\"\n  }\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        2640,
+        -880
+      ],
+      "id": "1cb030ad-45f1-44d3-8c55-a83f793c8db1",
+      "name": "Respond to Webhook - Send Results"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract the Flask API response\nconst apiResponse = $input.first().json;\n\n// Handle the response structure (it comes wrapped in body)\nconst flaskData = apiResponse.body || apiResponse;\n\n// Extract the exoplanet name from the Flask response\nconst exoplanetName = flaskData.planet_name || \"Unknown Exoplanet\";\n\n// Get the atmospheric composition directly from Flask\nconst atmosphericComposition = flaskData.atmospheric_composition || {};\n\n// Convert the composition to a more detailed format if needed\nconst detailedComposition = {};\nfor (const [molecule, percentage] of Object.entries(atmosphericComposition)) {\n  detailedComposition[molecule] = {\n    percentage: percentage,\n    molecule: molecule\n  };\n}\n\n// Create a text summary for the LLM\nconst compositionText = Object.entries(atmosphericComposition)\n  .sort((a, b) => b[1] - a[1])  // Sort by percentage descending\n  .map(([molecule, pct]) => `${molecule}: ${pct}%`)\n  .join(', ');\n\n// Create a clean summary for the next node\nconst summary = {\n  exoplanet_name: exoplanetName,\n  analysis_timestamp: new Date().toISOString(),\n  atmospheric_composition: atmosphericComposition,\n  detailed_composition: detailedComposition,\n  composition_summary: compositionText,\n  confidence: flaskData.confidence || \"unknown\",\n  total_percentage: flaskData.total_percentage || 0,\n  missing_features: flaskData.missing_features || [],\n  metadata: flaskData.metadata || {},\n  // Formatted text for LLM consumption\n  llm_prompt_text: `Atmospheric composition of ${exoplanetName}: ${compositionText}. \nConfidence: ${flaskData.confidence}. Total: ${flaskData.total_percentage}%`\n};\n\nreturn [{\n  json: summary\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        -880
+      ],
+      "id": "47e4910b-b870-4ef0-bbe9-bb51bcc77c79",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rawFeatures = $input.item.json.raw_features;\nconst webhookData = $('Webhook - Receive Query').item.json.body;\n\nreturn {\n  json: {\n    pl_name: webhookData.exoplanet_name || \"Unknown\",\n    pl_orbper: rawFeatures.orbital_period ?? null,\n    pl_rade: rawFeatures.planet_radius ?? null,\n    pl_bmasse: rawFeatures.planet_mass ?? null,\n    pl_orbeccen: rawFeatures.eccentricity ?? null,\n    st_teff: rawFeatures.stellar_temp ?? null,\n    st_rad: rawFeatures.stellar_radius ?? null,\n    st_mass: rawFeatures.stellar_mass ?? null,\n    sy_dist: rawFeatures.distance ?? null,\n    pl_eqt: rawFeatures.equilibrium_temp ?? null\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        -880
+      ],
+      "id": "44df62be-ad56-420c-ae98-8b0b65df2e35",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:5000/predict",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        720,
+        -880
+      ],
+      "id": "88fe42e2-2c4e-4fa0-8667-1968916ff518",
+      "name": "HTTP Request - local DL model"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Receive Query": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - NASA API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - NASA API": {
+      "main": [
+        [
+          {
+            "node": "Function - Preprocess Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Preprocess Data": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Parse Predictions": {
+      "main": [
+        [
+          {
+            "node": "AI Agent - Report Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent / LLM - Generate Report1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent - Report Generator",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent - Report Generator": {
+      "main": [
+        [
+          {
+            "node": "Function - Create PDF Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Create PDF Content": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Supabase Storage Upload PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Supabase Storage Upload PDF": {
+      "main": [
+        [
+          {
+            "node": "Function - Generate Public URL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Insert Prediction Data": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook - Send Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond to Webhook - Send Results": {
+      "main": [
+        []
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Function - Parse Predictions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - local DL model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Generate Public URL": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Insert Prediction Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - local DL model": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "85c1e570-db5a-48d3-81da-c09c57e47d4e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a1ab3a13aaad1fa842fcf0be6d8a5f09df2318e5931c561e5629323429a44aa2"
+  },
+  "id": "CtNuPsDJtYXKriTT",
+  "tags": []
+}
